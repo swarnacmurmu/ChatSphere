@@ -20,11 +20,12 @@ function Home() {
   const [selectedUser, setSelectedUser] = useState(null);
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
+  const [typingUser, setTypingUser] = useState("");
 
   const navigate = useNavigate();
   const currentUser = auth.currentUser;
-
   const messagesEndRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
 
   const getChatId = (uid1, uid2) => {
     return uid1 > uid2 ? `${uid1}_${uid2}` : `${uid2}_${uid1}`;
@@ -33,7 +34,6 @@ function Home() {
   const handleLogout = async () => {
     if (currentUser) {
       const userRef = doc(db, "users", currentUser.uid);
-
       await updateDoc(userRef, {
         online: false,
         lastSeen: serverTimestamp(),
@@ -44,7 +44,6 @@ function Home() {
     navigate("/");
   };
 
-  // 🔹 Fetch users + last message
   useEffect(() => {
     if (!currentUser) {
       navigate("/");
@@ -78,7 +77,6 @@ function Home() {
     return () => unsubscribe();
   }, [currentUser, navigate]);
 
-  // 🔹 Online / offline status
   useEffect(() => {
     if (!currentUser) return;
 
@@ -104,7 +102,6 @@ function Home() {
     };
   }, [currentUser]);
 
-  // 🔹 Fetch messages
   useEffect(() => {
     if (!selectedUser || !currentUser) return;
 
@@ -115,7 +112,7 @@ function Home() {
       orderBy("createdAt")
     );
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const unsubscribeMessages = onSnapshot(q, (snapshot) => {
       const allMessages = snapshot.docs.map((docItem) => ({
         id: docItem.id,
         ...docItem.data(),
@@ -124,25 +121,62 @@ function Home() {
       setMessages(allMessages);
     });
 
-    return () => unsubscribe();
+    const chatRef = doc(db, "chats", chatId);
+
+    const unsubscribeTyping = onSnapshot(chatRef, (snapshot) => {
+      if (snapshot.exists()) {
+        setTypingUser(snapshot.data().typing || "");
+      }
+    });
+
+    return () => {
+      unsubscribeMessages();
+      unsubscribeTyping();
+    };
   }, [selectedUser, currentUser]);
 
-  // 🔹 Auto scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // 🔹 Send message
+  const handleTyping = async (value) => {
+    setText(value);
+
+    if (!selectedUser || !currentUser) return;
+
+    const chatId = getChatId(currentUser.uid, selectedUser.uid);
+    const chatRef = doc(db, "chats", chatId);
+
+    await setDoc(
+      chatRef,
+      {
+        users: [currentUser.uid, selectedUser.uid],
+        typing: currentUser.uid,
+      },
+      { merge: true }
+    );
+
+    clearTimeout(typingTimeoutRef.current);
+
+    typingTimeoutRef.current = setTimeout(async () => {
+      await updateDoc(chatRef, {
+        typing: "",
+      });
+    }, 1200);
+  };
+
   const sendMessage = async () => {
     if (text.trim() === "" || !selectedUser || !currentUser) return;
 
     const chatId = getChatId(currentUser.uid, selectedUser.uid);
+    const chatRef = doc(db, "chats", chatId);
 
     await setDoc(
-      doc(db, "chats", chatId),
+      chatRef,
       {
         users: [currentUser.uid, selectedUser.uid],
         lastMessage: text,
+        typing: "",
         updatedAt: serverTimestamp(),
       },
       { merge: true }
@@ -158,9 +192,9 @@ function Home() {
     setText("");
   };
 
-  // 🔹 Time formatter
   const formatTime = (timestamp) => {
     if (!timestamp) return "";
+
     const date = timestamp.toDate();
 
     return date.toLocaleTimeString([], {
@@ -208,9 +242,7 @@ function Home() {
 
               <div>
                 <h4>{user.name}</h4>
-                <p>
-                  {user.online ? "Online" : user.lastMessage || user.email}
-                </p>
+                <p>{user.online ? "Online" : user.lastMessage || user.email}</p>
               </div>
             </div>
           ))}
@@ -226,7 +258,13 @@ function Home() {
           <>
             <div className="chat-header">
               <h2>{selectedUser.name}</h2>
-              <p>{selectedUser.online ? "Online" : "Offline"}</p>
+              <p>
+                {typingUser === selectedUser.uid
+                  ? `${selectedUser.name} is typing...`
+                  : selectedUser.online
+                  ? "Online"
+                  : "Offline"}
+              </p>
             </div>
 
             <div className="messages-area">
@@ -249,7 +287,7 @@ function Home() {
               <input
                 value={text}
                 placeholder="Type your message..."
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => handleTyping(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") sendMessage();
                 }}
